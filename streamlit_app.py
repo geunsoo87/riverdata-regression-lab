@@ -1,7 +1,9 @@
 import io
+import json
 import math
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -37,6 +39,16 @@ _DEFAULT_STYLE_CONFIG = {
     "line_width": 2.8,
     "panel_width": 6.4,
     "panel_height": 5.0,
+}
+_STYLE_SESSION_MAP = {
+    "title_size": "style_title_size",
+    "label_size": "style_label_size",
+    "tick_size": "style_tick_size",
+    "legend_size": "style_legend_size",
+    "point_size": "style_point_size",
+    "line_width": "style_line_width",
+    "panel_width": "style_panel_width",
+    "panel_height": "style_panel_height",
 }
 
 
@@ -170,6 +182,7 @@ def prepare_panel_data(
 
     panel_df = pd.DataFrame(
         {
+            "ROW_KEY": pd.Series(np.arange(len(df))).astype(str),
             "ID": id_series.astype(str),
             "X": pd.to_numeric(df[x_col], errors="coerce"),
             "Y": pd.to_numeric(df[y_col], errors="coerce"),
@@ -275,11 +288,12 @@ def compute_influence_table(fit_df: pd.DataFrame, ols_model: Any) -> pd.DataFram
     n = int(len(fit_df))
     cook_threshold = 4.0 / n if n > 0 else float("inf")
 
-    table = fit_df[["ID", "X", "Y"]].copy()
+    table = fit_df[["ROW_KEY", "ID", "X", "Y"]].copy()
+    table = table.rename(columns={"ROW_KEY": "row_key"})
     table["rstudent"] = pd.to_numeric(rstudent, errors="coerce")
     table["cooks_d"] = pd.to_numeric(cooks_d, errors="coerce")
     table["leverage"] = pd.to_numeric(leverage, errors="coerce")
-    table["is_outlier"] = (
+    table["is_outlier_candidate"] = (
         table["rstudent"].abs() > _RSTUDENT_THRESHOLD
     ) | (table["cooks_d"] > cook_threshold)
 
@@ -454,6 +468,169 @@ def create_single_panel_figure(panel_cfg: dict[str, Any], panel_result: dict[str
     return fig
 
 
+@st.cache_data(show_spinner=False)
+def load_help_markdown() -> str:
+    help_path = Path(__file__).with_name("HELP.md")
+    if help_path.exists():
+        return help_path.read_text(encoding="utf-8")
+
+    return (
+        "# Help\n\n"
+        "HELP.md file not found. Add HELP.md next to streamlit_app.py to show guide content."
+    )
+
+
+def build_settings_preset_payload(
+    panel_configs: list[dict[str, Any]],
+    style_cfg: dict[str, Any],
+    global_label_map: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "panel_count": int(len(panel_configs)),
+        "panel_configs": panel_configs,
+        "style_cfg": style_cfg,
+        "global_label_map": {str(k): str(v) for k, v in dict(global_label_map).items()},
+    }
+
+
+def _cast_style_value(style_key: str, value: Any) -> float | int:
+    if style_key in {"line_width", "panel_width", "panel_height"}:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(_DEFAULT_STYLE_CONFIG[style_key])
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(_DEFAULT_STYLE_CONFIG[style_key])
+
+
+def _sanitize_loaded_panel_config(raw_cfg: dict[str, Any], columns: list[str]) -> dict[str, Any]:
+    fallback_x = columns[0]
+    fallback_y = columns[1] if len(columns) > 1 else columns[0]
+
+    x_col = str(raw_cfg.get("x_col", fallback_x))
+    y_col = str(raw_cfg.get("y_col", fallback_y))
+    if x_col not in columns:
+        x_col = fallback_x
+    if y_col not in columns:
+        y_col = fallback_y
+
+    log_y = bool(raw_cfg.get("log_y", False))
+    x_min = _safe_float(raw_cfg.get("x_min"))
+    x_max = _safe_float(raw_cfg.get("x_max"))
+    y_min = _safe_float(raw_cfg.get("y_min"))
+    y_max = _safe_float(raw_cfg.get("y_max"))
+
+    return {
+        "x_col": x_col,
+        "y_col": y_col,
+        "log_y": log_y,
+        "caption": str(raw_cfg.get("caption", "")),
+        "x_label": str(raw_cfg.get("x_label", x_col)),
+        "y_label": str(raw_cfg.get("y_label", f"log10({y_col})" if log_y else y_col)),
+        "x_mode": str(raw_cfg.get("x_mode", "auto")) if str(raw_cfg.get("x_mode", "auto")) in {"auto", "manual"} else "auto",
+        "x_min": 0.0 if x_min is None else float(x_min),
+        "x_max": 1.0 if x_max is None else float(x_max),
+        "y_mode": str(raw_cfg.get("y_mode", "auto")) if str(raw_cfg.get("y_mode", "auto")) in {"auto", "manual"} else "auto",
+        "y_min": 0.0 if y_min is None else float(y_min),
+        "y_max": 1.0 if y_max is None else float(y_max),
+        "x_tick": str(raw_cfg.get("x_tick", "")),
+        "y_tick": str(raw_cfg.get("y_tick", "")),
+        "remove_outliers": bool(raw_cfg.get("remove_outliers", False)),
+        "show_ci": bool(raw_cfg.get("show_ci", True)),
+        "show_pi": bool(raw_cfg.get("show_pi", True)),
+        "show_legend": bool(raw_cfg.get("show_legend", True)),
+    }
+
+
+def _apply_panel_widget_state(panel_idx: int, panel_cfg: dict[str, Any]) -> None:
+    st.session_state[f"panel_{panel_idx}_x_col"] = panel_cfg["x_col"]
+    st.session_state[f"panel_{panel_idx}_y_col"] = panel_cfg["y_col"]
+    st.session_state[f"panel_{panel_idx}_log_y"] = bool(panel_cfg["log_y"])
+    st.session_state[f"panel_{panel_idx}_caption"] = str(panel_cfg["caption"])
+    st.session_state[f"panel_{panel_idx}_x_label"] = str(panel_cfg["x_label"])
+    st.session_state[f"panel_{panel_idx}_y_label"] = str(panel_cfg["y_label"])
+    st.session_state[f"panel_{panel_idx}_x_mode"] = str(panel_cfg["x_mode"])
+    st.session_state[f"panel_{panel_idx}_y_mode"] = str(panel_cfg["y_mode"])
+    st.session_state[f"panel_{panel_idx}_x_min"] = float(panel_cfg["x_min"])
+    st.session_state[f"panel_{panel_idx}_x_max"] = float(panel_cfg["x_max"])
+    st.session_state[f"panel_{panel_idx}_y_min"] = float(panel_cfg["y_min"])
+    st.session_state[f"panel_{panel_idx}_y_max"] = float(panel_cfg["y_max"])
+    st.session_state[f"panel_{panel_idx}_x_tick"] = str(panel_cfg["x_tick"])
+    st.session_state[f"panel_{panel_idx}_y_tick"] = str(panel_cfg["y_tick"])
+    st.session_state[f"panel_{panel_idx}_remove_outliers"] = bool(panel_cfg["remove_outliers"])
+    st.session_state[f"panel_{panel_idx}_show_ci"] = bool(panel_cfg["show_ci"])
+    st.session_state[f"panel_{panel_idx}_show_pi"] = bool(panel_cfg["show_pi"])
+    st.session_state[f"panel_{panel_idx}_show_legend"] = bool(panel_cfg["show_legend"])
+    st.session_state[f"panel_{panel_idx}_x_prev"] = panel_cfg["x_col"]
+    st.session_state[f"panel_{panel_idx}_y_prev"] = panel_cfg["y_col"]
+    st.session_state[f"panel_{panel_idx}_log_prev"] = bool(panel_cfg["log_y"])
+
+
+def apply_loaded_preset_to_session(
+    preset_obj: dict[str, Any],
+    columns: list[str],
+) -> tuple[list[str], int]:
+    warnings: list[str] = []
+    if not columns:
+        raise ValueError("No columns available for preset mapping.")
+
+    panel_count_raw = preset_obj.get("panel_count", 4)
+    try:
+        panel_count = int(panel_count_raw)
+    except (TypeError, ValueError):
+        panel_count = 4
+        warnings.append("Invalid panel_count in preset. Using default 4.")
+    panel_count = min(12, max(1, panel_count))
+
+    raw_panel_configs = preset_obj.get("panel_configs", [])
+    if not isinstance(raw_panel_configs, list):
+        raise ValueError("panel_configs in preset must be a list.")
+
+    normalized_panel_configs: list[dict[str, Any]] = []
+    for i in range(panel_count):
+        raw_cfg = raw_panel_configs[i] if i < len(raw_panel_configs) else {}
+        if not isinstance(raw_cfg, dict):
+            raw_cfg = {}
+            warnings.append(f"panel_configs[{i}] is invalid. Replaced with defaults.")
+        normalized_panel_configs.append(_sanitize_loaded_panel_config(raw_cfg, columns))
+
+    st.session_state["panel_count"] = panel_count
+    st.session_state["panel_configs"] = {
+        idx: cfg for idx, cfg in enumerate(normalized_panel_configs)
+    }
+
+    loaded_label_map = preset_obj.get("global_label_map", {})
+    if isinstance(loaded_label_map, dict):
+        st.session_state["global_label_map"] = {
+            str(k): str(v) for k, v in loaded_label_map.items()
+        }
+    else:
+        st.session_state["global_label_map"] = {}
+        warnings.append("global_label_map is invalid. Cleared.")
+
+    loaded_style_cfg = preset_obj.get("style_cfg", {})
+    if not isinstance(loaded_style_cfg, dict):
+        loaded_style_cfg = {}
+        warnings.append("style_cfg is invalid. Using defaults.")
+
+    for style_key, session_key in _STYLE_SESSION_MAP.items():
+        st.session_state[session_key] = _cast_style_value(
+            style_key,
+            loaded_style_cfg.get(style_key, _DEFAULT_STYLE_CONFIG[style_key]),
+        )
+
+    for idx, cfg in enumerate(normalized_panel_configs):
+        _apply_panel_widget_state(idx, cfg)
+
+    st.session_state["manual_review_flags"] = {}
+    return warnings, panel_count
+
+
 def _ensure_state(key: str, value: Any) -> None:
     if key not in st.session_state:
         st.session_state[key] = value
@@ -477,6 +654,9 @@ def main() -> None:
     _ensure_state("style_line_width", _DEFAULT_STYLE_CONFIG["line_width"])
     _ensure_state("style_panel_width", _DEFAULT_STYLE_CONFIG["panel_width"])
     _ensure_state("style_panel_height", _DEFAULT_STYLE_CONFIG["panel_height"])
+    _ensure_state("manual_review_flags", {})
+    _ensure_state("show_help_doc", False)
+    _ensure_state("preset_apply_notice", "")
 
     uploaded_file = st.file_uploader(
         "Upload CSV or XLSX (drag and drop)",
@@ -508,6 +688,52 @@ def main() -> None:
     if not columns:
         st.error("No columns were found in the uploaded dataset.")
         return
+
+    helper_cols = st.columns([1.0, 3.0])
+    with helper_cols[0]:
+        if st.button("Help / Guide", key="toggle_help_doc"):
+            st.session_state["show_help_doc"] = not st.session_state["show_help_doc"]
+    with helper_cols[1]:
+        st.caption(
+            "Use preset JSON to reuse panel/style settings across files with similar columns."
+        )
+
+    if st.session_state["show_help_doc"]:
+        with st.expander("User Guide", expanded=True):
+            st.markdown(load_help_markdown())
+
+    with st.expander("Preset (Load saved settings)", expanded=False):
+        preset_file = st.file_uploader(
+            "Load preset JSON",
+            type=["json"],
+            key="preset_loader",
+            help=(
+                "Load a previously saved settings preset. "
+                "Current panel/style/label settings will be overwritten."
+            ),
+        )
+        apply_preset = st.button(
+            "Apply preset",
+            key="apply_preset_button",
+            disabled=(preset_file is None),
+        )
+        if apply_preset and preset_file is not None:
+            try:
+                preset_obj = json.loads(preset_file.getvalue().decode("utf-8"))
+                if not isinstance(preset_obj, dict):
+                    raise ValueError("Preset JSON root must be an object.")
+                warnings, loaded_count = apply_loaded_preset_to_session(preset_obj, columns)
+                notice = f"Preset applied successfully (panel_count={loaded_count})."
+                if warnings:
+                    notice += " Warnings: " + " | ".join(warnings)
+                st.session_state["preset_apply_notice"] = notice
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to apply preset: {exc}")
+
+    if st.session_state["preset_apply_notice"]:
+        st.success(st.session_state["preset_apply_notice"])
+        st.session_state["preset_apply_notice"] = ""
 
     st.subheader("Settings / Panel Selection")
     top_cols = st.columns([1.0, 1.0, 1.0, 1.4])
@@ -986,6 +1212,26 @@ def main() -> None:
 
     st.session_state["panel_configs"] = {idx: cfg for idx, cfg in enumerate(panel_configs)}
 
+    preset_payload = build_settings_preset_payload(
+        panel_configs=panel_configs,
+        style_cfg=style_cfg,
+        global_label_map=st.session_state["global_label_map"],
+    )
+    preset_bytes = json.dumps(preset_payload, ensure_ascii=False, indent=2).encode("utf-8")
+    preset_filename = f"{datetime.now().strftime('%Y%m%d')}_riverdata_settings_preset.json"
+
+    with st.expander("Preset (Save current settings)", expanded=False):
+        st.download_button(
+            label="Download current preset JSON",
+            data=preset_bytes,
+            file_name=preset_filename,
+            mime="application/json",
+            help=(
+                "Save current panel/style/label settings as JSON. "
+                "You can reload this preset later for another dataset."
+            ),
+        )
+
     plot_cols = 2 if panel_count <= 4 else 3
     plot_rows = int(math.ceil(panel_count / plot_cols))
     fig, axes = plt.subplots(
@@ -1019,6 +1265,9 @@ def main() -> None:
             context=f"Panel {idx + 1} Y label",
         )
         sanitized_cfg["panel_title"] = make_panel_label(idx, panel_cfg["caption"])
+        panel_signature = (
+            f"panel_{idx}|x={panel_cfg['x_col']}|y={panel_cfg['y_col']}|log={int(panel_cfg['log_y'])}"
+        )
 
         fit_df, counts, prep_warnings = prepare_panel_data(
             df=df,
@@ -1039,9 +1288,35 @@ def main() -> None:
                 "warnings": panel_warnings,
                 "prep_counts": counts,
                 "outlier_table": pd.DataFrame(
-                    columns=["ID", "X", "Y", "rstudent", "cooks_d", "leverage"]
+                    columns=[
+                        "ID",
+                        "X",
+                        "Y",
+                        "rstudent",
+                        "cooks_d",
+                        "leverage",
+                        "outside_95_ci",
+                        "outside_95_pi",
+                    ]
+                ),
+                "full_diag_table": pd.DataFrame(
+                    columns=[
+                        "row_key",
+                        "ID",
+                        "X",
+                        "Y",
+                        "rstudent",
+                        "cooks_d",
+                        "leverage",
+                        "is_outlier_candidate",
+                        "outside_95_ci",
+                        "outside_95_pi",
+                        "manual_review",
+                    ]
                 ),
                 "outlier_count": 0,
+                "outside_ci_count": 0,
+                "outside_pi_count": 0,
                 "n": int(len(fit_df)),
                 "cook_threshold": float("nan"),
                 "compare_df": None,
@@ -1049,6 +1324,7 @@ def main() -> None:
                 "removed_count": 0,
                 "plot_cfg": sanitized_cfg,
                 "style_cfg": style_cfg,
+                "panel_signature": panel_signature,
             }
             panel_results.append(panel_result)
             render_panel(flat_axes[idx], sanitized_cfg, panel_result)
@@ -1069,9 +1345,35 @@ def main() -> None:
                 )
 
             influence_df = compute_influence_table(fit_df, fit_before["ols_model"])
+
+            point_design = sm.add_constant(fit_df["X"].to_numpy(), has_constant="add")
+            point_sf = fit_before["ols_model"].get_prediction(point_design).summary_frame(alpha=0.05)
+            influence_df["outside_95_ci"] = (
+                (fit_df["Y"].to_numpy() < point_sf["mean_ci_lower"].to_numpy())
+                | (fit_df["Y"].to_numpy() > point_sf["mean_ci_upper"].to_numpy())
+            )
+            influence_df["outside_95_pi"] = (
+                (fit_df["Y"].to_numpy() < point_sf["obs_ci_lower"].to_numpy())
+                | (fit_df["Y"].to_numpy() > point_sf["obs_ci_upper"].to_numpy())
+            )
+
+            manual_map = st.session_state["manual_review_flags"].get(panel_signature, {})
+            influence_df["manual_review"] = (
+                influence_df["row_key"].astype(str).map(manual_map).fillna(False).astype(bool)
+            )
+
             outlier_table = influence_df.loc[
-                influence_df["is_outlier"],
-                ["ID", "X", "Y", "rstudent", "cooks_d", "leverage"],
+                influence_df["is_outlier_candidate"],
+                [
+                    "ID",
+                    "X",
+                    "Y",
+                    "rstudent",
+                    "cooks_d",
+                    "leverage",
+                    "outside_95_ci",
+                    "outside_95_pi",
+                ],
             ].copy()
 
             fit_after = fit_before
@@ -1086,7 +1388,7 @@ def main() -> None:
                         "Outlier removal enabled, but no candidates matched thresholds."
                     )
                 else:
-                    keep_mask = ~influence_df["is_outlier"].to_numpy()
+                    keep_mask = ~influence_df["is_outlier_candidate"].to_numpy()
                     filtered_df = fit_df.loc[keep_mask].reset_index(drop=True)
                     if len(filtered_df) < 3:
                         panel_warnings.append(
@@ -1142,7 +1444,10 @@ def main() -> None:
                     else "OLS regression"
                 ),
                 "outlier_table": outlier_table,
+                "full_diag_table": influence_df.copy(),
                 "outlier_count": int(len(outlier_table)),
+                "outside_ci_count": int(influence_df["outside_95_ci"].sum()),
+                "outside_pi_count": int(influence_df["outside_95_pi"].sum()),
                 "n": int(len(fit_df)),
                 "cook_threshold": float(4.0 / len(fit_df)),
                 "compare_df": compare_df,
@@ -1150,6 +1455,7 @@ def main() -> None:
                 "removed_count": removed_count,
                 "plot_cfg": sanitized_cfg,
                 "style_cfg": style_cfg,
+                "panel_signature": panel_signature,
             }
 
         except Exception as exc:
@@ -1159,9 +1465,35 @@ def main() -> None:
                 "warnings": panel_warnings,
                 "prep_counts": counts,
                 "outlier_table": pd.DataFrame(
-                    columns=["ID", "X", "Y", "rstudent", "cooks_d", "leverage"]
+                    columns=[
+                        "ID",
+                        "X",
+                        "Y",
+                        "rstudent",
+                        "cooks_d",
+                        "leverage",
+                        "outside_95_ci",
+                        "outside_95_pi",
+                    ]
+                ),
+                "full_diag_table": pd.DataFrame(
+                    columns=[
+                        "row_key",
+                        "ID",
+                        "X",
+                        "Y",
+                        "rstudent",
+                        "cooks_d",
+                        "leverage",
+                        "is_outlier_candidate",
+                        "outside_95_ci",
+                        "outside_95_pi",
+                        "manual_review",
+                    ]
                 ),
                 "outlier_count": 0,
+                "outside_ci_count": 0,
+                "outside_pi_count": 0,
                 "n": int(len(fit_df)),
                 "cook_threshold": float("nan"),
                 "compare_df": None,
@@ -1169,6 +1501,7 @@ def main() -> None:
                 "removed_count": 0,
                 "plot_cfg": sanitized_cfg,
                 "style_cfg": style_cfg,
+                "panel_signature": panel_signature,
             }
 
         panel_results.append(panel_result)
@@ -1212,7 +1545,9 @@ def main() -> None:
                 f"n={result['n']} | thresholds: "
                 f"|rstudent|>{_RSTUDENT_THRESHOLD:.1f}, "
                 f"Cook's D>{result['cook_threshold']:.4g} | "
-                f"candidates={result['outlier_count']}"
+                f"candidates={result['outlier_count']} | "
+                f"outside_95_CI={result['outside_ci_count']} | "
+                f"outside_95_PI={result['outside_pi_count']}"
             )
 
             outlier_table = result["outlier_table"].copy()
@@ -1220,6 +1555,79 @@ def main() -> None:
                 st.info("No outlier candidates found.")
             else:
                 st.dataframe(outlier_table, use_container_width=True)
+
+            st.write("Full diagnostics table (all rows)")
+            full_diag_table = result["full_diag_table"].copy()
+            if full_diag_table.empty:
+                st.info("No full diagnostics rows available.")
+            else:
+                panel_signature = result["panel_signature"]
+                manual_map = st.session_state["manual_review_flags"].get(panel_signature, {})
+                full_diag_table["manual_review"] = (
+                    full_diag_table["row_key"].astype(str).map(manual_map).fillna(False).astype(bool)
+                )
+
+                numeric_cols = ["X", "Y", "rstudent", "cooks_d", "leverage"]
+                for col in numeric_cols:
+                    if col in full_diag_table.columns:
+                        full_diag_table[col] = pd.to_numeric(
+                            full_diag_table[col], errors="coerce"
+                        ).round(6)
+
+                editor_df = full_diag_table[
+                    [
+                        "row_key",
+                        "ID",
+                        "X",
+                        "Y",
+                        "rstudent",
+                        "cooks_d",
+                        "leverage",
+                        "is_outlier_candidate",
+                        "outside_95_ci",
+                        "outside_95_pi",
+                        "manual_review",
+                    ]
+                ].copy()
+
+                edited_df = st.data_editor(
+                    editor_df,
+                    key=f"panel_{idx}_full_diag_editor",
+                    hide_index=True,
+                    use_container_width=True,
+                    disabled=[col for col in editor_df.columns if col != "manual_review"],
+                    column_config={
+                        "row_key": None,
+                        "is_outlier_candidate": st.column_config.CheckboxColumn(
+                            "is_outlier_candidate",
+                            help="Automatic candidate by |rstudent|>3 or Cook's D>4/n.",
+                        ),
+                        "outside_95_ci": st.column_config.CheckboxColumn(
+                            "outside_95_ci",
+                            help="Observation lies outside the 95% confidence interval (mean response).",
+                        ),
+                        "outside_95_pi": st.column_config.CheckboxColumn(
+                            "outside_95_pi",
+                            help="Observation lies outside the 95% prediction interval.",
+                        ),
+                        "manual_review": st.column_config.CheckboxColumn(
+                            "manual_review",
+                            help="Analyst manual review flag (does not auto-remove rows).",
+                        ),
+                    },
+                )
+
+                st.session_state["manual_review_flags"][panel_signature] = {
+                    str(row["row_key"]): bool(row["manual_review"])
+                    for _, row in edited_df[["row_key", "manual_review"]].iterrows()
+                }
+
+                manual_checked_count = int(edited_df["manual_review"].sum())
+                st.caption(
+                    "Manual review checked rows: "
+                    f"{manual_checked_count} / {len(edited_df)} "
+                    "(manual review flags do not change automatic outlier removal)."
+                )
 
             if panel_configs[idx]["remove_outliers"]:
                 st.write("Outlier removal comparison (before vs after)")
