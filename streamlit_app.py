@@ -104,6 +104,85 @@ def _comparison_frame(before_fit: dict[str, Any], after_fit: dict[str, Any]) -> 
     )
 
 
+def _pseudo_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true_arr = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred_arr = np.asarray(y_pred, dtype=float).reshape(-1)
+    ss_tot = float(np.sum(np.square(y_true_arr - np.mean(y_true_arr))))
+    if math.isclose(ss_tot, 0.0):
+        return float("nan")
+    ss_res = float(np.sum(np.square(y_true_arr - y_pred_arr)))
+    return 1.0 - (ss_res / ss_tot)
+
+
+def compute_model_summary_table(x: np.ndarray, y: np.ndarray) -> pd.DataFrame:
+    x_arr = np.asarray(x, dtype=float).reshape(-1)
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    design = sm.add_constant(x_arr, has_constant="add")
+
+    rows: list[dict[str, Any]] = []
+
+    try:
+        ols_model = sm.OLS(y_arr, design).fit()
+        ols_pred = ols_model.predict(design)
+        rows.append(
+            {
+                "Model": "OLS",
+                "Intercept": float(ols_model.params[0]),
+                "Slope": float(ols_model.params[1]),
+                "R2_or_pseudoR2": float(ols_model.rsquared),
+                "RMSE": float(np.sqrt(np.mean(np.square(y_arr - ols_pred)))),
+                "Status": "OK",
+            }
+        )
+    except Exception as exc:
+        rows.append(
+            {
+                "Model": "OLS",
+                "Intercept": float("nan"),
+                "Slope": float("nan"),
+                "R2_or_pseudoR2": float("nan"),
+                "RMSE": float("nan"),
+                "Status": f"Failed: {exc}",
+            }
+        )
+
+    robust_specs = [
+        ("Huber", sm.robust.norms.HuberT()),
+        ("Tukey", sm.robust.norms.TukeyBiweight()),
+    ]
+    for model_name, robust_norm in robust_specs:
+        try:
+            robust_model = sm.RLM(y_arr, design, M=robust_norm).fit()
+            robust_pred = robust_model.predict(design)
+            rows.append(
+                {
+                    "Model": model_name,
+                    "Intercept": float(robust_model.params[0]),
+                    "Slope": float(robust_model.params[1]),
+                    "R2_or_pseudoR2": float(_pseudo_r2(y_arr, robust_pred)),
+                    "RMSE": float(np.sqrt(np.mean(np.square(y_arr - robust_pred)))),
+                    "Status": "OK",
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "Model": model_name,
+                    "Intercept": float("nan"),
+                    "Slope": float("nan"),
+                    "R2_or_pseudoR2": float("nan"),
+                    "RMSE": float("nan"),
+                    "Status": f"Failed: {exc}",
+                }
+            )
+
+    summary_df = pd.DataFrame(rows)
+    for col in ["Intercept", "Slope", "R2_or_pseudoR2", "RMSE"]:
+        summary_df[col] = pd.to_numeric(summary_df[col], errors="coerce").round(6)
+
+    return summary_df
+
+
 def _default_export_filename(panel_configs: list[dict[str, Any]], ext: str) -> str:
     date_tag = datetime.now().strftime("%Y%m%d")
     parts: list[str] = []
@@ -412,7 +491,7 @@ def render_panel(ax: Any, panel_cfg: dict[str, Any], panel_result: dict[str, Any
         line_df["Y"],
         color="black",
         linewidth=line_width,
-        label=panel_result.get("line_label", "Regression"),
+        label=panel_result.get("line_label", "Reg"),
         zorder=4,
     )
 
@@ -1320,6 +1399,26 @@ def main() -> None:
                 "n": int(len(fit_df)),
                 "cook_threshold": float("nan"),
                 "compare_df": None,
+                "model_summary_before": pd.DataFrame(
+                    columns=[
+                        "Model",
+                        "Intercept",
+                        "Slope",
+                        "R2_or_pseudoR2",
+                        "RMSE",
+                        "Status",
+                    ]
+                ),
+                "model_summary_after": pd.DataFrame(
+                    columns=[
+                        "Model",
+                        "Intercept",
+                        "Slope",
+                        "R2_or_pseudoR2",
+                        "RMSE",
+                        "Status",
+                    ]
+                ),
                 "removal_applied": False,
                 "removed_count": 0,
                 "plot_cfg": sanitized_cfg,
@@ -1381,6 +1480,11 @@ def main() -> None:
             removal_applied = False
             removed_count = int(len(outlier_table))
             compare_df: pd.DataFrame | None = None
+            model_summary_before = compute_model_summary_table(
+                fit_df["X"].to_numpy(),
+                fit_df["Y"].to_numpy(),
+            )
+            model_summary_after = model_summary_before.copy()
 
             if panel_cfg["remove_outliers"]:
                 if removed_count == 0:
@@ -1408,6 +1512,10 @@ def main() -> None:
                             )
                         plot_df = filtered_df
                         removal_applied = True
+                        model_summary_after = compute_model_summary_table(
+                            filtered_df["X"].to_numpy(),
+                            filtered_df["Y"].to_numpy(),
+                        )
 
                 compare_df = _comparison_frame(fit_before, fit_after)
 
@@ -1438,11 +1546,7 @@ def main() -> None:
                 "plot_df": plot_df,
                 "pred_df": pred_df,
                 "line_df": line_df,
-                "line_label": (
-                    f"Robust regression ({robust_norm})"
-                    if fit_after["used_robust"]
-                    else "OLS regression"
-                ),
+                "line_label": "Reg",
                 "outlier_table": outlier_table,
                 "full_diag_table": influence_df.copy(),
                 "outlier_count": int(len(outlier_table)),
@@ -1451,6 +1555,8 @@ def main() -> None:
                 "n": int(len(fit_df)),
                 "cook_threshold": float(4.0 / len(fit_df)),
                 "compare_df": compare_df,
+                "model_summary_before": model_summary_before,
+                "model_summary_after": model_summary_after,
                 "removal_applied": removal_applied,
                 "removed_count": removed_count,
                 "plot_cfg": sanitized_cfg,
@@ -1497,6 +1603,26 @@ def main() -> None:
                 "n": int(len(fit_df)),
                 "cook_threshold": float("nan"),
                 "compare_df": None,
+                "model_summary_before": pd.DataFrame(
+                    columns=[
+                        "Model",
+                        "Intercept",
+                        "Slope",
+                        "R2_or_pseudoR2",
+                        "RMSE",
+                        "Status",
+                    ]
+                ),
+                "model_summary_after": pd.DataFrame(
+                    columns=[
+                        "Model",
+                        "Intercept",
+                        "Slope",
+                        "R2_or_pseudoR2",
+                        "RMSE",
+                        "Status",
+                    ]
+                ),
                 "removal_applied": False,
                 "removed_count": 0,
                 "plot_cfg": sanitized_cfg,
@@ -1549,6 +1675,36 @@ def main() -> None:
                 f"outside_95_CI={result['outside_ci_count']} | "
                 f"outside_95_PI={result['outside_pi_count']}"
             )
+
+            st.write("Model coefficients and key statistics (OLS / Huber / Tukey)")
+            if panel_configs[idx]["remove_outliers"]:
+                st.markdown("**Before outlier removal**")
+                st.dataframe(
+                    result["model_summary_before"],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.markdown("**After outlier removal**")
+                st.dataframe(
+                    result["model_summary_after"],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if not result["removal_applied"]:
+                    st.caption(
+                        "After table is unchanged because outlier removal was not applied "
+                        "(no candidates or insufficient remaining rows)."
+                    )
+            else:
+                st.dataframe(
+                    result["model_summary_before"],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.caption(
+                    "Figure line follows the selected mode, but this table always shows "
+                    "OLS / Huber / Tukey side-by-side."
+                )
 
             outlier_table = result["outlier_table"].copy()
             if outlier_table.empty:
