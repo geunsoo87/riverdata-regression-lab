@@ -13,6 +13,7 @@ streamlit run streamlit_app.py
 
 - Drag-and-drop CSV/XLSX upload and dataframe preview
 - Configurable multipanel (default 2x2) regression plots
+- Per-panel `log10` transform for X and/or Y (linear-linear, log-linear, linear-log, log-log)
 - OLS regression with 95% CI/PI and optional robust regression line (RLM)
 - Per-panel toggles for showing/hiding 95% CI, 95% PI, and legend
 - Optional outlier-candidate marker overlay on plots (red outline)

@@ -256,6 +256,7 @@ def prepare_panel_data(
     x_col: str,
     y_col: str,
     log_y: bool,
+    log_x: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, int], list[str]]:
     warnings: list[str] = []
 
@@ -277,14 +278,27 @@ def prepare_panel_data(
 
     fit_df = panel_df.dropna(subset=["X", "Y"]).copy()
 
-    dropped_log_nonpositive = 0
+    dropped_log_nonpositive_x = 0
+    dropped_log_nonpositive_y = 0
+
+    if log_x:
+        non_positive_x_mask = fit_df["X"] <= 0
+        dropped_log_nonpositive_x = int(non_positive_x_mask.sum())
+        if dropped_log_nonpositive_x > 0:
+            warnings.append(
+                "X log10 enabled. Non-positive X rows were dropped: "
+                f"{dropped_log_nonpositive_x}."
+            )
+        fit_df = fit_df.loc[~non_positive_x_mask].copy()
+        fit_df["X"] = np.log10(fit_df["X"])
+
     if log_y:
         non_positive_mask = fit_df["Y"] <= 0
-        dropped_log_nonpositive = int(non_positive_mask.sum())
-        if dropped_log_nonpositive > 0:
+        dropped_log_nonpositive_y = int(non_positive_mask.sum())
+        if dropped_log_nonpositive_y > 0:
             warnings.append(
                 "Y log10 enabled. Non-positive Y rows were dropped: "
-                f"{dropped_log_nonpositive}."
+                f"{dropped_log_nonpositive_y}."
             )
         fit_df = fit_df.loc[~non_positive_mask].copy()
         fit_df["Y"] = np.log10(fit_df["Y"])
@@ -292,7 +306,9 @@ def prepare_panel_data(
     counts = {
         "input_rows": int(len(panel_df)),
         "dropped_xy_nan": dropped_xy_nan,
-        "dropped_log_nonpositive": dropped_log_nonpositive,
+        "dropped_log_nonpositive_x": dropped_log_nonpositive_x,
+        "dropped_log_nonpositive_y": dropped_log_nonpositive_y,
+        "dropped_log_nonpositive": dropped_log_nonpositive_x + dropped_log_nonpositive_y,
         "remaining_rows": int(len(fit_df)),
     }
 
@@ -382,6 +398,7 @@ def compute_influence_table(fit_df: pd.DataFrame, ols_model: Any) -> pd.DataFram
 def apply_axis_settings(
     ax: Any,
     cfg: dict[str, Any],
+    transformed_x: bool,
     transformed_y: bool,
     warn_bucket: list[str],
 ) -> None:
@@ -392,7 +409,8 @@ def apply_axis_settings(
         x_min = _safe_float(cfg.get("x_min"))
         x_max = _safe_float(cfg.get("x_max"))
         if x_min is None or x_max is None or not x_min < x_max:
-            warn_bucket.append("Invalid manual X range. Using auto range.")
+            axis_name = "log10(X)" if transformed_x else "X"
+            warn_bucket.append(f"Invalid manual {axis_name} range. Using auto range.")
         else:
             ax.set_xlim(x_min, x_max)
 
@@ -516,6 +534,7 @@ def render_panel(ax: Any, panel_cfg: dict[str, Any], panel_result: dict[str, Any
     apply_axis_settings(
         ax,
         panel_cfg,
+        transformed_x=bool(panel_cfg.get("log_x", False)),
         transformed_y=bool(panel_cfg.get("log_y", False)),
         warn_bucket=panel_result["warnings"],
     )
@@ -612,6 +631,7 @@ def _sanitize_loaded_panel_config(raw_cfg: dict[str, Any], columns: list[str]) -
     if y_col not in columns:
         y_col = fallback_y
 
+    log_x = bool(raw_cfg.get("log_x", False))
     log_y = bool(raw_cfg.get("log_y", False))
     x_min = _safe_float(raw_cfg.get("x_min"))
     x_max = _safe_float(raw_cfg.get("x_max"))
@@ -621,9 +641,10 @@ def _sanitize_loaded_panel_config(raw_cfg: dict[str, Any], columns: list[str]) -
     return {
         "x_col": x_col,
         "y_col": y_col,
+        "log_x": log_x,
         "log_y": log_y,
         "caption": str(raw_cfg.get("caption", "")),
-        "x_label": str(raw_cfg.get("x_label", x_col)),
+        "x_label": str(raw_cfg.get("x_label", f"log10({x_col})" if log_x else x_col)),
         "y_label": str(raw_cfg.get("y_label", f"log10({y_col})" if log_y else y_col)),
         "x_mode": str(raw_cfg.get("x_mode", "auto")) if str(raw_cfg.get("x_mode", "auto")) in {"auto", "manual"} else "auto",
         "x_min": 0.0 if x_min is None else float(x_min),
@@ -644,6 +665,7 @@ def _sanitize_loaded_panel_config(raw_cfg: dict[str, Any], columns: list[str]) -
 def _apply_panel_widget_state(panel_idx: int, panel_cfg: dict[str, Any]) -> None:
     st.session_state[f"panel_{panel_idx}_x_col"] = panel_cfg["x_col"]
     st.session_state[f"panel_{panel_idx}_y_col"] = panel_cfg["y_col"]
+    st.session_state[f"panel_{panel_idx}_log_x"] = bool(panel_cfg.get("log_x", False))
     st.session_state[f"panel_{panel_idx}_log_y"] = bool(panel_cfg["log_y"])
     st.session_state[f"panel_{panel_idx}_caption"] = str(panel_cfg["caption"])
     st.session_state[f"panel_{panel_idx}_x_label"] = str(panel_cfg["x_label"])
@@ -665,6 +687,7 @@ def _apply_panel_widget_state(panel_idx: int, panel_cfg: dict[str, Any]) -> None
     )
     st.session_state[f"panel_{panel_idx}_x_prev"] = panel_cfg["x_col"]
     st.session_state[f"panel_{panel_idx}_y_prev"] = panel_cfg["y_col"]
+    st.session_state[f"panel_{panel_idx}_x_log_prev"] = bool(panel_cfg.get("log_x", False))
     st.session_state[f"panel_{panel_idx}_log_prev"] = bool(panel_cfg["log_y"])
 
 
@@ -1038,7 +1061,8 @@ def main() -> None:
 
         x_key = f"panel_{i}_x_col"
         y_key = f"panel_{i}_y_col"
-        log_key = f"panel_{i}_log_y"
+        log_x_key = f"panel_{i}_log_x"
+        log_y_key = f"panel_{i}_log_y"
         caption_key = f"panel_{i}_caption"
         x_label_key = f"panel_{i}_x_label"
         y_label_key = f"panel_{i}_y_label"
@@ -1057,11 +1081,13 @@ def main() -> None:
         show_outlier_markers_key = f"panel_{i}_show_outlier_markers"
         x_prev_key = f"panel_{i}_x_prev"
         y_prev_key = f"panel_{i}_y_prev"
+        x_log_prev_key = f"panel_{i}_x_log_prev"
         y_log_prev_key = f"panel_{i}_log_prev"
 
         _ensure_state(x_key, default_x)
         _ensure_state(y_key, default_y)
-        _ensure_state(log_key, bool(stored_cfg.get("log_y", False)))
+        _ensure_state(log_x_key, bool(stored_cfg.get("log_x", False)))
+        _ensure_state(log_y_key, bool(stored_cfg.get("log_y", False)))
         _ensure_state(caption_key, str(stored_cfg.get("caption", "")))
         _ensure_state(x_mode_key, str(stored_cfg.get("x_mode", "auto")))
         _ensure_state(y_mode_key, str(stored_cfg.get("y_mode", "auto")))
@@ -1086,7 +1112,7 @@ def main() -> None:
             st.session_state[y_key] = default_y
 
         with tab:
-            row1 = st.columns([1.0, 1.0, 1.0])
+            row1 = st.columns([1.0, 1.0, 1.0, 1.0])
             with row1[0]:
                 x_col = st.selectbox(
                     "X column",
@@ -1102,20 +1128,33 @@ def main() -> None:
                     help="해당 패널의 종속변수(Y) 컬럼을 선택합니다.",
                 )
             with row1[2]:
+                log_x = st.checkbox(
+                    "Apply log10 to X",
+                    key=log_x_key,
+                    help=(
+                        "Apply log10 transform to X. "
+                        "Rows with X<=0 are excluded with warning."
+                    ),
+                )
+            with row1[3]:
                 log_y = st.checkbox(
                     "Apply log10 to Y",
-                    key=log_key,
+                    key=log_y_key,
                     help=(
                         "Y에 log10 변환을 적용합니다. "
                         "Y<=0 값은 자동 제외되며 경고로 안내됩니다."
                     ),
                 )
 
-            if st.session_state.get(x_prev_key) != x_col:
-                st.session_state[x_label_key] = st.session_state["global_label_map"].get(
-                    x_col, x_col
-                )
+            x_template = st.session_state["global_label_map"].get(x_col, x_col)
+            x_default = f"log10({x_template})" if log_x else x_template
+            if (
+                st.session_state.get(x_prev_key) != x_col
+                or st.session_state.get(x_log_prev_key) != log_x
+            ):
+                st.session_state[x_label_key] = x_default
                 st.session_state[x_prev_key] = x_col
+                st.session_state[x_log_prev_key] = log_x
 
             y_template = st.session_state["global_label_map"].get(y_col, y_col)
             y_default = f"log10({y_template})" if log_y else y_template
@@ -1127,7 +1166,7 @@ def main() -> None:
                 st.session_state[y_prev_key] = y_col
                 st.session_state[y_log_prev_key] = log_y
 
-            _ensure_state(x_label_key, st.session_state["global_label_map"].get(x_col, x_col))
+            _ensure_state(x_label_key, x_default)
             _ensure_state(y_label_key, y_default)
 
             caption = st.text_input(
@@ -1293,7 +1332,8 @@ def main() -> None:
                 ),
             )
             if save_template:
-                st.session_state["global_label_map"][x_col] = x_label
+                if not log_x:
+                    st.session_state["global_label_map"][x_col] = x_label
                 if not log_y:
                     st.session_state["global_label_map"][y_col] = y_label
                 st.success("Saved to global label templates.")
@@ -1302,6 +1342,7 @@ def main() -> None:
             {
                 "x_col": x_col,
                 "y_col": y_col,
+                "log_x": bool(log_x),
                 "log_y": bool(log_y),
                 "caption": caption,
                 "x_label": x_label,
@@ -1358,7 +1399,9 @@ def main() -> None:
     for idx, panel_cfg in enumerate(panel_configs):
         panel_warnings: list[str] = []
 
-        fallback_x_label = panel_cfg["x_col"]
+        fallback_x_label = (
+            f"log10({panel_cfg['x_col']})" if panel_cfg.get("log_x", False) else panel_cfg["x_col"]
+        )
         fallback_y_label = (
             f"log10({panel_cfg['y_col']})" if panel_cfg["log_y"] else panel_cfg["y_col"]
         )
@@ -1378,7 +1421,9 @@ def main() -> None:
         )
         sanitized_cfg["panel_title"] = make_panel_label(idx, panel_cfg["caption"])
         panel_signature = (
-            f"panel_{idx}|x={panel_cfg['x_col']}|y={panel_cfg['y_col']}|log={int(panel_cfg['log_y'])}"
+            f"panel_{idx}|x={panel_cfg['x_col']}|y={panel_cfg['y_col']}|"
+            f"logx={int(bool(panel_cfg.get('log_x', False)))}|"
+            f"logy={int(bool(panel_cfg['log_y']))}"
         )
 
         fit_df, counts, prep_warnings = prepare_panel_data(
@@ -1387,6 +1432,7 @@ def main() -> None:
             x_col=panel_cfg["x_col"],
             y_col=panel_cfg["y_col"],
             log_y=bool(panel_cfg["log_y"]),
+            log_x=bool(panel_cfg.get("log_x", False)),
         )
         panel_warnings.extend(prep_warnings)
 
@@ -1697,7 +1743,9 @@ def main() -> None:
                 "Preprocessing summary: "
                 f"input={counts['input_rows']}, "
                 f"dropped_xy={counts['dropped_xy_nan']}, "
-                f"dropped_log={counts['dropped_log_nonpositive']}, "
+                f"dropped_log_x={counts.get('dropped_log_nonpositive_x', 0)}, "
+                f"dropped_log_y={counts.get('dropped_log_nonpositive_y', 0)}, "
+                f"dropped_log_total={counts['dropped_log_nonpositive']}, "
                 f"remaining={counts['remaining_rows']}"
             )
 
