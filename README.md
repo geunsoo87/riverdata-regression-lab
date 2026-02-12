@@ -16,11 +16,11 @@ streamlit run streamlit_app.py
 - Per-panel `log10` transform for X and/or Y (linear-linear, log-linear, linear-log, log-log)
 - OLS regression with 95% CI/PI and optional robust regression line (RLM)
 - Per-panel toggles for showing/hiding 95% CI, 95% PI, and legend
-- Optional outlier-candidate marker overlay on plots (red outline)
+- Optional residual-outlier marker overlay on plots (red outline)
 - Panel-wise influence diagnostics (`rstudent`, Cook's D, leverage)
 - Per-panel coefficient/stat summary table for OLS, Huber, and Tukey models
-- Full per-panel diagnostics table for all rows with auto candidate flag, outside-95%CI/PI flags, and manual review checkbox
-- Optional outlier-candidate removal with before/after metric comparison
+- Full per-panel diagnostics table with separated flags for residual outlier vs influential point, class label, and manual review checkbox
+- Optional outlier removal based on residual criteria only (`outside_95_PI` OR `|rstudent| > 3`) with before/after comparison
 - Export both full grid figure and individual panel figures
 - Adjustable PNG DPI (300 to 1200) for high-resolution output
 - Adjustable figure style defaults (title/axis/tick/legend font sizes, marker size, line width, panel size)

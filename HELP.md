@@ -21,10 +21,12 @@
 - `Show legend`:
   범례 표시/숨김.
 - `Apply outlier removal`:
-  자동 이상치 후보를 제외한 뒤 다시 회귀합니다.
+  `is_outlier_residual=True` 행만 제외하고 회귀를 다시 계산합니다.
 
 ## 4) 이상치 후보 기준 (자동 판정)
-- `|rstudent| > 3` 또는 `Cook's D > 4/n` 이면 `is_outlier_candidate = True`
+- `is_outlier_residual = outside_95_pi OR (|rstudent| > 3)`를 사용합니다.
+- `is_influential = (Cook's D > 4/n) OR (leverage > 2*p/n)`를 사용합니다. (단순회귀 p=2)
+- Cook's D/leverage는 영향점 진단용이며, 이상치 자동 제거 기준으로 사용하지 않습니다.
 - 여기서 `n`은 해당 패널에서 유효한 분석 행 수입니다.
 - `leverage`는 영향력 판단 보조 지표로 표에 제공합니다.
 
@@ -35,8 +37,14 @@
   해당 점이 회귀계수에 미치는 영향력.
 - `leverage`:
   X 공간에서의 영향도(극단 X 여부).
-- `is_outlier_candidate`:
-  앱의 자동 규칙으로 잡힌 후보 여부.
+- `is_outlier_residual`:
+  잔차 기반 이상치 후보 여부 (`outside_95_pi` 또는 `|rstudent|>3`).
+- `is_influential`:
+  영향점 여부 (`Cook's D` 또는 `leverage` 임계치 초과).
+- `outlier_class`:
+  `BOTH`, `RESIDUAL_OUTLIER`, `INFLUENTIAL`, `NONE` 중 하나.
+- `action`:
+  `QC_CHECK`, `SENSITIVITY`, `PRIORITY_REVIEW`, `OK`, `MANUAL_REVIEW` 권장 라벨.
 - `outside_95_ci`:
   관측값이 95% CI(평균 반응 구간) 밖인지 여부.
 - `outside_95_pi`:
@@ -67,7 +75,7 @@
 - 동일한 컬럼 구조를 가진 파일에 매우 빠르게 재적용할 수 있습니다.
 
 ## 9) 보고/논문 작성 시 권장 워크플로우
-1. 자동 후보 확인 (`is_outlier_candidate`)
+1. 자동 후보 확인 (`is_outlier_residual`, `is_influential`, `outlier_class`)
 2. CI/PI outside 여부 함께 확인
 3. `manual_review`로 근거 기록
 4. 제거 전/후 계수/R2/RMSE 비교

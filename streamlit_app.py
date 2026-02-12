@@ -381,16 +381,24 @@ def compute_influence_table(fit_df: pd.DataFrame, ols_model: Any) -> pd.DataFram
     leverage = influence.hat_matrix_diag
 
     n = int(len(fit_df))
+    p = int(np.asarray(ols_model.params, dtype=float).size)
     cook_threshold = 4.0 / n if n > 0 else float("inf")
+    leverage_threshold = (2.0 * p / n) if n > 0 else float("inf")
 
     table = fit_df[["ROW_KEY", "ID", "X", "Y"]].copy()
     table = table.rename(columns={"ROW_KEY": "row_key"})
     table["rstudent"] = pd.to_numeric(rstudent, errors="coerce")
     table["cooks_d"] = pd.to_numeric(cooks_d, errors="coerce")
     table["leverage"] = pd.to_numeric(leverage, errors="coerce")
-    table["is_outlier_candidate"] = (
-        table["rstudent"].abs() > _RSTUDENT_THRESHOLD
-    ) | (table["cooks_d"] > cook_threshold)
+    table["cook_threshold"] = float(cook_threshold)
+    table["leverage_threshold"] = float(leverage_threshold)
+    table["is_influential"] = (table["cooks_d"] > cook_threshold) | (
+        table["leverage"] > leverage_threshold
+    )
+    table["is_outlier_residual"] = False
+    table["is_outlier_candidate"] = False
+    table["outlier_class"] = "NONE"
+    table["action"] = "OK"
 
     return table
 
@@ -515,7 +523,7 @@ def render_panel(ax: Any, panel_cfg: dict[str, Any], panel_result: dict[str, Any
                 edgecolors="red",
                 s=point_size * 1.8,
                 linewidths=1.4,
-                label="Outlier",
+                label="Residual outlier",
                 zorder=4,
             )
     ax.plot(
@@ -1289,8 +1297,9 @@ def main() -> None:
                     "Apply outlier removal",
                     key=remove_key,
                     help=(
-                        "이상치 후보(|rstudent|>3 또는 Cook's D>4/n)를 제외한 뒤 "
-                        "회귀를 다시 계산합니다."
+                        "Recompute regression after removing residual outliers only "
+                        "(outside_95_PI or |rstudent|>3). "
+                        "Cook's D/leverage are diagnostic and not auto-removal criteria."
                     ),
                 )
 
@@ -1318,8 +1327,8 @@ def main() -> None:
                     "Show outlier markers",
                     key=show_outlier_markers_key,
                     help=(
-                        "Overlay outlier candidates on the plot with red outlined markers "
-                        "for quick visual inspection."
+                        "Overlay residual outlier candidates on the plot with red outlined "
+                        "markers for quick visual inspection."
                     ),
                 )
 
@@ -1453,6 +1462,10 @@ def main() -> None:
                         "rstudent",
                         "cooks_d",
                         "leverage",
+                        "is_outlier_residual",
+                        "is_influential",
+                        "outlier_class",
+                        "action",
                         "outside_95_ci",
                         "outside_95_pi",
                     ]
@@ -1467,17 +1480,24 @@ def main() -> None:
                         "rstudent",
                         "cooks_d",
                         "leverage",
+                        "is_outlier_residual",
+                        "is_influential",
                         "is_outlier_candidate",
+                        "outlier_class",
+                        "action",
                         "outside_95_ci",
                         "outside_95_pi",
                         "manual_review",
                     ]
                 ),
                 "outlier_count": 0,
+                "influential_count": 0,
+                "both_count": 0,
                 "outside_ci_count": 0,
                 "outside_pi_count": 0,
                 "n": int(len(fit_df)),
                 "cook_threshold": float("nan"),
+                "leverage_threshold": float("nan"),
                 "compare_df": None,
                 "model_summary_before": pd.DataFrame(
                     columns=[
@@ -1536,13 +1556,41 @@ def main() -> None:
                 | (fit_df["Y"].to_numpy() > point_sf["obs_ci_upper"].to_numpy())
             )
 
+            influence_df["is_outlier_residual"] = influence_df["outside_95_pi"] | (
+                influence_df["rstudent"].abs() > _RSTUDENT_THRESHOLD
+            )
+            influence_df["is_outlier_candidate"] = influence_df["is_outlier_residual"]
+
+            both_mask = influence_df["is_outlier_residual"] & influence_df["is_influential"]
+            residual_only_mask = influence_df["is_outlier_residual"] & ~influence_df["is_influential"]
+            influential_only_mask = ~influence_df["is_outlier_residual"] & influence_df["is_influential"]
+
+            influence_df["outlier_class"] = np.select(
+                [both_mask, residual_only_mask, influential_only_mask],
+                ["BOTH", "RESIDUAL_OUTLIER", "INFLUENTIAL"],
+                default="NONE",
+            )
+            influence_df["action"] = np.select(
+                [both_mask, residual_only_mask, influential_only_mask],
+                [
+                    "PRIORITY_REVIEW",
+                    "QC_CHECK",
+                    "SENSITIVITY",
+                ],
+                default="OK",
+            )
+
             manual_map = st.session_state["manual_review_flags"].get(panel_signature, {})
             influence_df["manual_review"] = (
                 influence_df["row_key"].astype(str).map(manual_map).fillna(False).astype(bool)
             )
+            influence_df.loc[
+                influence_df["manual_review"] & (influence_df["outlier_class"] == "NONE"),
+                "action",
+            ] = "MANUAL_REVIEW"
 
             outlier_table = influence_df.loc[
-                influence_df["is_outlier_candidate"],
+                influence_df["is_outlier_residual"],
                 [
                     "ID",
                     "X",
@@ -1550,6 +1598,10 @@ def main() -> None:
                     "rstudent",
                     "cooks_d",
                     "leverage",
+                    "is_outlier_residual",
+                    "is_influential",
+                    "outlier_class",
+                    "action",
                     "outside_95_ci",
                     "outside_95_pi",
                 ],
@@ -1569,10 +1621,10 @@ def main() -> None:
             if panel_cfg["remove_outliers"]:
                 if removed_count == 0:
                     panel_warnings.append(
-                        "Outlier removal enabled, but no candidates matched thresholds."
+                        "Outlier removal enabled, but no residual outliers matched criteria."
                     )
                 else:
-                    keep_mask = ~influence_df["is_outlier_candidate"].to_numpy()
+                    keep_mask = ~influence_df["is_outlier_residual"].to_numpy()
                     filtered_df = fit_df.loc[keep_mask].reset_index(drop=True)
                     if len(filtered_df) < 3:
                         panel_warnings.append(
@@ -1629,14 +1681,19 @@ def main() -> None:
                 "line_label": "Reg",
                 "outlier_table": outlier_table,
                 "outlier_points": influence_df.loc[
-                    influence_df["is_outlier_candidate"], ["X", "Y"]
+                    influence_df["is_outlier_residual"], ["X", "Y"]
                 ].copy(),
                 "full_diag_table": influence_df.copy(),
                 "outlier_count": int(len(outlier_table)),
+                "influential_count": int(influence_df["is_influential"].sum()),
+                "both_count": int(
+                    (influence_df["is_outlier_residual"] & influence_df["is_influential"]).sum()
+                ),
                 "outside_ci_count": int(influence_df["outside_95_ci"].sum()),
                 "outside_pi_count": int(influence_df["outside_95_pi"].sum()),
                 "n": int(len(fit_df)),
-                "cook_threshold": float(4.0 / len(fit_df)),
+                "cook_threshold": float(influence_df["cook_threshold"].iloc[0]),
+                "leverage_threshold": float(influence_df["leverage_threshold"].iloc[0]),
                 "compare_df": compare_df,
                 "model_summary_before": model_summary_before,
                 "model_summary_after": model_summary_after,
@@ -1661,6 +1718,10 @@ def main() -> None:
                         "rstudent",
                         "cooks_d",
                         "leverage",
+                        "is_outlier_residual",
+                        "is_influential",
+                        "outlier_class",
+                        "action",
                         "outside_95_ci",
                         "outside_95_pi",
                     ]
@@ -1675,17 +1736,24 @@ def main() -> None:
                         "rstudent",
                         "cooks_d",
                         "leverage",
+                        "is_outlier_residual",
+                        "is_influential",
                         "is_outlier_candidate",
+                        "outlier_class",
+                        "action",
                         "outside_95_ci",
                         "outside_95_pi",
                         "manual_review",
                     ]
                 ),
                 "outlier_count": 0,
+                "influential_count": 0,
+                "both_count": 0,
                 "outside_ci_count": 0,
                 "outside_pi_count": 0,
                 "n": int(len(fit_df)),
                 "cook_threshold": float("nan"),
+                "leverage_threshold": float("nan"),
                 "compare_df": None,
                 "model_summary_before": pd.DataFrame(
                     columns=[
@@ -1726,7 +1794,10 @@ def main() -> None:
     st.pyplot(fig, use_container_width=True)
 
     st.subheader("Outlier Diagnostics (Table/Text only)")
-    st.caption("Outlier candidates are not annotated on the plot by design.")
+    st.caption(
+        "Residual outlier and influential flags are separated. "
+        "Only residual outliers are used for optional removal."
+    )
 
     for idx, result in enumerate(panel_results):
         title = make_panel_label(idx, panel_configs[idx]["caption"])
@@ -1754,10 +1825,13 @@ def main() -> None:
                 continue
 
             st.write(
-                f"n={result['n']} | thresholds: "
-                f"|rstudent|>{_RSTUDENT_THRESHOLD:.1f}, "
-                f"Cook's D>{result['cook_threshold']:.4g} | "
-                f"candidates={result['outlier_count']} | "
+                f"n={result['n']} | residual-outlier rule: "
+                f"outside_95_PI=1 OR |rstudent|>{_RSTUDENT_THRESHOLD:.1f} | "
+                f"influential rule: Cook's D>{result['cook_threshold']:.4g} "
+                f"OR leverage>{result['leverage_threshold']:.4g} | "
+                f"residual_outliers={result['outlier_count']} | "
+                f"influential={result['influential_count']} | "
+                f"both={result['both_count']} | "
                 f"outside_95_CI={result['outside_ci_count']} | "
                 f"outside_95_PI={result['outside_pi_count']}"
             )
@@ -1779,7 +1853,7 @@ def main() -> None:
                 if not result["removal_applied"]:
                     st.caption(
                         "After table is unchanged because outlier removal was not applied "
-                        "(no candidates or insufficient remaining rows)."
+                        "(no residual outliers or insufficient remaining rows)."
                     )
             else:
                 st.dataframe(
@@ -1794,7 +1868,7 @@ def main() -> None:
 
             outlier_table = result["outlier_table"].copy()
             if outlier_table.empty:
-                st.info("No outlier candidates found.")
+                st.info("No residual outlier candidates found.")
             else:
                 st.dataframe(outlier_table, use_container_width=True)
 
@@ -1825,7 +1899,10 @@ def main() -> None:
                         "rstudent",
                         "cooks_d",
                         "leverage",
-                        "is_outlier_candidate",
+                        "is_outlier_residual",
+                        "is_influential",
+                        "outlier_class",
+                        "action",
                         "outside_95_ci",
                         "outside_95_pi",
                         "manual_review",
@@ -1840,9 +1917,21 @@ def main() -> None:
                     disabled=[col for col in editor_df.columns if col != "manual_review"],
                     column_config={
                         "row_key": None,
-                        "is_outlier_candidate": st.column_config.CheckboxColumn(
-                            "is_outlier_candidate",
-                            help="Automatic candidate by |rstudent|>3 or Cook's D>4/n.",
+                        "is_outlier_residual": st.column_config.CheckboxColumn(
+                            "is_outlier_residual",
+                            help="Residual outlier by outside_95_pi OR |rstudent|>3.",
+                        ),
+                        "is_influential": st.column_config.CheckboxColumn(
+                            "is_influential",
+                            help="Influential point by Cook's D or leverage threshold.",
+                        ),
+                        "outlier_class": st.column_config.TextColumn(
+                            "outlier_class",
+                            help="BOTH / RESIDUAL_OUTLIER / INFLUENTIAL / NONE",
+                        ),
+                        "action": st.column_config.TextColumn(
+                            "action",
+                            help="Suggested workflow action label.",
                         ),
                         "outside_95_ci": st.column_config.CheckboxColumn(
                             "outside_95_ci",
@@ -1878,7 +1967,7 @@ def main() -> None:
                 st.caption(
                     "Removal applied: "
                     f"{'Yes' if result['removal_applied'] else 'No'} "
-                    f"(candidate rows={result['removed_count']})"
+                    f"(residual outlier rows={result['removed_count']})"
                 )
 
     st.subheader("Export")
