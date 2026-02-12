@@ -431,6 +431,7 @@ def render_panel(ax: Any, panel_cfg: dict[str, Any], panel_result: dict[str, Any
     show_ci = bool(panel_cfg.get("show_ci", True))
     show_pi = bool(panel_cfg.get("show_pi", True))
     show_legend = bool(panel_cfg.get("show_legend", True))
+    show_outlier_markers = bool(panel_cfg.get("show_outlier_markers", False))
 
     panel_title = panel_cfg.get("panel_title", "").strip()
     if panel_title:
@@ -486,13 +487,26 @@ def render_panel(ax: Any, panel_cfg: dict[str, Any], panel_result: dict[str, Any
         label="Data",
         zorder=3,
     )
+    if show_outlier_markers:
+        outlier_points = panel_result.get("outlier_points", pd.DataFrame())
+        if isinstance(outlier_points, pd.DataFrame) and not outlier_points.empty:
+            ax.scatter(
+                outlier_points["X"],
+                outlier_points["Y"],
+                facecolors="none",
+                edgecolors="red",
+                s=point_size * 1.8,
+                linewidths=1.4,
+                label="Outlier",
+                zorder=4,
+            )
     ax.plot(
         line_df["X"],
         line_df["Y"],
         color="black",
         linewidth=line_width,
         label=panel_result.get("line_label", "Reg"),
-        zorder=4,
+        zorder=5,
     )
 
     ax.set_xlabel(panel_cfg["x_label"], fontsize=label_size)
@@ -623,6 +637,7 @@ def _sanitize_loaded_panel_config(raw_cfg: dict[str, Any], columns: list[str]) -
         "show_ci": bool(raw_cfg.get("show_ci", True)),
         "show_pi": bool(raw_cfg.get("show_pi", True)),
         "show_legend": bool(raw_cfg.get("show_legend", True)),
+        "show_outlier_markers": bool(raw_cfg.get("show_outlier_markers", False)),
     }
 
 
@@ -645,6 +660,9 @@ def _apply_panel_widget_state(panel_idx: int, panel_cfg: dict[str, Any]) -> None
     st.session_state[f"panel_{panel_idx}_show_ci"] = bool(panel_cfg["show_ci"])
     st.session_state[f"panel_{panel_idx}_show_pi"] = bool(panel_cfg["show_pi"])
     st.session_state[f"panel_{panel_idx}_show_legend"] = bool(panel_cfg["show_legend"])
+    st.session_state[f"panel_{panel_idx}_show_outlier_markers"] = bool(
+        panel_cfg["show_outlier_markers"]
+    )
     st.session_state[f"panel_{panel_idx}_x_prev"] = panel_cfg["x_col"]
     st.session_state[f"panel_{panel_idx}_y_prev"] = panel_cfg["y_col"]
     st.session_state[f"panel_{panel_idx}_log_prev"] = bool(panel_cfg["log_y"])
@@ -1036,6 +1054,7 @@ def main() -> None:
         show_ci_key = f"panel_{i}_show_ci"
         show_pi_key = f"panel_{i}_show_pi"
         show_legend_key = f"panel_{i}_show_legend"
+        show_outlier_markers_key = f"panel_{i}_show_outlier_markers"
         x_prev_key = f"panel_{i}_x_prev"
         y_prev_key = f"panel_{i}_y_prev"
         y_log_prev_key = f"panel_{i}_log_prev"
@@ -1056,6 +1075,10 @@ def main() -> None:
         _ensure_state(show_ci_key, bool(stored_cfg.get("show_ci", True)))
         _ensure_state(show_pi_key, bool(stored_cfg.get("show_pi", True)))
         _ensure_state(show_legend_key, bool(stored_cfg.get("show_legend", True)))
+        _ensure_state(
+            show_outlier_markers_key,
+            bool(stored_cfg.get("show_outlier_markers", False)),
+        )
 
         if st.session_state[x_key] not in columns:
             st.session_state[x_key] = default_x
@@ -1232,7 +1255,7 @@ def main() -> None:
                     ),
                 )
 
-            row5 = st.columns([1.0, 1.0, 1.0])
+            row5 = st.columns([1.0, 1.0, 1.0, 1.2])
             with row5[0]:
                 show_ci = st.checkbox(
                     "Show 95% CI",
@@ -1250,6 +1273,15 @@ def main() -> None:
                     "Show legend",
                     key=show_legend_key,
                     help="Show or hide legend entries in this panel.",
+                )
+            with row5[3]:
+                show_outlier_markers = st.checkbox(
+                    "Show outlier markers",
+                    key=show_outlier_markers_key,
+                    help=(
+                        "Overlay outlier candidates on the plot with red outlined markers "
+                        "for quick visual inspection."
+                    ),
                 )
 
             save_template = st.button(
@@ -1286,6 +1318,7 @@ def main() -> None:
                 "show_ci": bool(show_ci),
                 "show_pi": bool(show_pi),
                 "show_legend": bool(show_legend),
+                "show_outlier_markers": bool(show_outlier_markers),
             }
         )
 
@@ -1378,6 +1411,7 @@ def main() -> None:
                         "outside_95_pi",
                     ]
                 ),
+                "outlier_points": pd.DataFrame(columns=["X", "Y"]),
                 "full_diag_table": pd.DataFrame(
                     columns=[
                         "row_key",
@@ -1548,6 +1582,9 @@ def main() -> None:
                 "line_df": line_df,
                 "line_label": "Reg",
                 "outlier_table": outlier_table,
+                "outlier_points": influence_df.loc[
+                    influence_df["is_outlier_candidate"], ["X", "Y"]
+                ].copy(),
                 "full_diag_table": influence_df.copy(),
                 "outlier_count": int(len(outlier_table)),
                 "outside_ci_count": int(influence_df["outside_95_ci"].sum()),
@@ -1582,6 +1619,7 @@ def main() -> None:
                         "outside_95_pi",
                     ]
                 ),
+                "outlier_points": pd.DataFrame(columns=["X", "Y"]),
                 "full_diag_table": pd.DataFrame(
                     columns=[
                         "row_key",
