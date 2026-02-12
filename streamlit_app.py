@@ -458,6 +458,7 @@ def render_panel(ax: Any, panel_cfg: dict[str, Any], panel_result: dict[str, Any
     show_pi = bool(panel_cfg.get("show_pi", True))
     show_legend = bool(panel_cfg.get("show_legend", True))
     show_outlier_markers = bool(panel_cfg.get("show_outlier_markers", False))
+    show_priority_shortlist_plot = bool(panel_result.get("show_priority_shortlist_plot", False))
 
     panel_title = panel_cfg.get("panel_title", "").strip()
     if panel_title:
@@ -526,6 +527,33 @@ def render_panel(ax: Any, panel_cfg: dict[str, Any], panel_result: dict[str, Any
                 label="Residual outlier",
                 zorder=4,
             )
+    if show_priority_shortlist_plot:
+        shortlist_points = panel_result.get("priority_shortlist_points", pd.DataFrame())
+        if isinstance(shortlist_points, pd.DataFrame) and not shortlist_points.empty:
+            ax.scatter(
+                shortlist_points["X"],
+                shortlist_points["Y"],
+                facecolors="none",
+                edgecolors="firebrick",
+                marker="D",
+                s=point_size * 2.1,
+                linewidths=1.6,
+                label=f"Top-{len(shortlist_points)} review",
+                zorder=4.2,
+            )
+            for _, row in shortlist_points.iterrows():
+                if pd.isna(row.get("priority_rank")):
+                    continue
+                ax.annotate(
+                    str(int(row["priority_rank"])),
+                    (float(row["X"]), float(row["Y"])),
+                    textcoords="offset points",
+                    xytext=(5, 4),
+                    color="firebrick",
+                    fontsize=max(8.0, tick_size - 2.0),
+                    fontweight="bold",
+                    zorder=4.4,
+                )
     ax.plot(
         line_df["X"],
         line_df["Y"],
@@ -785,6 +813,10 @@ def main() -> None:
     _ensure_state("manual_review_flags", {})
     _ensure_state("show_help_doc", False)
     _ensure_state("preset_apply_notice", "")
+    _ensure_state("show_priority_shortlist_table", True)
+    _ensure_state("show_priority_shortlist_plot", False)
+    _ensure_state("include_ci_only_shortlist", True)
+    _ensure_state("priority_shortlist_top_n", 5)
 
     uploaded_file = st.file_uploader(
         "Upload CSV or XLSX (drag and drop)",
@@ -928,6 +960,47 @@ def main() -> None:
                 "강건 회귀의 손실 함수 선택입니다. "
                 "Huber는 완만하게, Tukey는 큰 이상치 가중치를 더 강하게 줄입니다."
             ),
+        )
+
+    shortlist_cols = st.columns([1.2, 1.2, 1.2, 0.8])
+    with shortlist_cols[0]:
+        show_priority_shortlist_table = st.checkbox(
+            "Show priority shortlist table",
+            key="show_priority_shortlist_table",
+            help=(
+                "Show ranked candidate rows in diagnostics to help decide "
+                "which points to review/remove first."
+            ),
+        )
+    with shortlist_cols[1]:
+        show_priority_shortlist_plot = st.checkbox(
+            "Show priority shortlist on plot",
+            key="show_priority_shortlist_plot",
+            help=(
+                "If enabled, Top-N priority candidates are overlaid on the plot "
+                "with rank labels (1, 2, 3...)."
+            ),
+        )
+    with shortlist_cols[2]:
+        include_ci_only_shortlist = st.checkbox(
+            "Include CI-only rows in shortlist",
+            key="include_ci_only_shortlist",
+            help=(
+                "Include rows outside 95% CI even when they are not residual outliers. "
+                "Residual outliers remain highest priority."
+            ),
+        )
+    with shortlist_cols[3]:
+        shortlist_top_n = int(
+            st.number_input(
+                "Top-N",
+                min_value=3,
+                max_value=5,
+                value=int(st.session_state["priority_shortlist_top_n"]),
+                step=1,
+                key="priority_shortlist_top_n",
+                help="Number of priority candidates shown per panel.",
+            )
         )
 
     with st.expander("Figure style defaults (adjustable)", expanded=True):
@@ -1464,6 +1537,8 @@ def main() -> None:
                         "leverage",
                         "is_outlier_residual",
                         "is_influential",
+                        "is_priority_shortlist",
+                        "priority_rank",
                         "outlier_class",
                         "action",
                         "outside_95_ci",
@@ -1471,6 +1546,30 @@ def main() -> None:
                     ]
                 ),
                 "outlier_points": pd.DataFrame(columns=["X", "Y"]),
+                "priority_shortlist_table": pd.DataFrame(
+                    columns=[
+                        "priority_rank",
+                        "ID",
+                        "X",
+                        "Y",
+                        "is_outlier_residual",
+                        "is_influential",
+                        "outside_95_ci",
+                        "outside_95_pi",
+                        "rstudent",
+                        "cooks_d",
+                        "leverage",
+                        "outlier_class",
+                        "action",
+                    ]
+                ),
+                "priority_shortlist_points": pd.DataFrame(
+                    columns=["X", "Y", "priority_rank"]
+                ),
+                "show_priority_shortlist_table": bool(show_priority_shortlist_table),
+                "show_priority_shortlist_plot": bool(show_priority_shortlist_plot),
+                "shortlist_top_n": int(shortlist_top_n),
+                "include_ci_only_shortlist": bool(include_ci_only_shortlist),
                 "full_diag_table": pd.DataFrame(
                     columns=[
                         "row_key",
@@ -1483,6 +1582,8 @@ def main() -> None:
                         "is_outlier_residual",
                         "is_influential",
                         "is_outlier_candidate",
+                        "is_priority_shortlist",
+                        "priority_rank",
                         "outlier_class",
                         "action",
                         "outside_95_ci",
@@ -1589,6 +1690,70 @@ def main() -> None:
                 "action",
             ] = "MANUAL_REVIEW"
 
+            shortlist_mask = influence_df["is_outlier_residual"].copy()
+            if include_ci_only_shortlist:
+                shortlist_mask = shortlist_mask | influence_df["outside_95_ci"]
+
+            shortlist_source = influence_df.loc[shortlist_mask].copy()
+            shortlist_columns = [
+                "priority_rank",
+                "ID",
+                "X",
+                "Y",
+                "is_outlier_residual",
+                "is_influential",
+                "outside_95_ci",
+                "outside_95_pi",
+                "rstudent",
+                "cooks_d",
+                "leverage",
+                "outlier_class",
+                "action",
+            ]
+            if shortlist_source.empty:
+                shortlist_table = pd.DataFrame(columns=shortlist_columns)
+                shortlist_points = pd.DataFrame(columns=["X", "Y", "priority_rank"])
+                influence_df["priority_rank"] = np.nan
+                influence_df["is_priority_shortlist"] = False
+            else:
+                shortlist_source["abs_rstudent"] = (
+                    pd.to_numeric(shortlist_source["rstudent"], errors="coerce")
+                    .abs()
+                    .fillna(-np.inf)
+                )
+                shortlist_source = shortlist_source.sort_values(
+                    by=[
+                        "is_outlier_residual",
+                        "outside_95_pi",
+                        "abs_rstudent",
+                        "outside_95_ci",
+                        "cooks_d",
+                        "leverage",
+                    ],
+                    ascending=[False, False, False, False, False, False],
+                ).copy()
+                shortlist_source["priority_rank"] = np.arange(
+                    1, len(shortlist_source) + 1, dtype=int
+                )
+                shortlist_table = shortlist_source.head(shortlist_top_n)[shortlist_columns].copy()
+                shortlist_points = shortlist_table[["X", "Y", "priority_rank"]].copy()
+
+                rank_map = {
+                    str(row["row_key"]): int(row["priority_rank"])
+                    for _, row in shortlist_source.head(shortlist_top_n)[
+                        ["row_key", "priority_rank"]
+                    ].iterrows()
+                }
+                influence_df["priority_rank"] = (
+                    influence_df["row_key"].astype(str).map(rank_map).astype("float")
+                )
+                influence_df["is_priority_shortlist"] = influence_df["priority_rank"].notna()
+                influence_df["priority_rank"] = (
+                    pd.to_numeric(influence_df["priority_rank"], errors="coerce")
+                    .round(0)
+                    .astype("Int64")
+                )
+
             outlier_table = influence_df.loc[
                 influence_df["is_outlier_residual"],
                 [
@@ -1683,6 +1848,12 @@ def main() -> None:
                 "outlier_points": influence_df.loc[
                     influence_df["is_outlier_residual"], ["X", "Y"]
                 ].copy(),
+                "priority_shortlist_table": shortlist_table,
+                "priority_shortlist_points": shortlist_points,
+                "show_priority_shortlist_table": bool(show_priority_shortlist_table),
+                "show_priority_shortlist_plot": bool(show_priority_shortlist_plot),
+                "shortlist_top_n": int(shortlist_top_n),
+                "include_ci_only_shortlist": bool(include_ci_only_shortlist),
                 "full_diag_table": influence_df.copy(),
                 "outlier_count": int(len(outlier_table)),
                 "influential_count": int(influence_df["is_influential"].sum()),
@@ -1727,6 +1898,30 @@ def main() -> None:
                     ]
                 ),
                 "outlier_points": pd.DataFrame(columns=["X", "Y"]),
+                "priority_shortlist_table": pd.DataFrame(
+                    columns=[
+                        "priority_rank",
+                        "ID",
+                        "X",
+                        "Y",
+                        "is_outlier_residual",
+                        "is_influential",
+                        "outside_95_ci",
+                        "outside_95_pi",
+                        "rstudent",
+                        "cooks_d",
+                        "leverage",
+                        "outlier_class",
+                        "action",
+                    ]
+                ),
+                "priority_shortlist_points": pd.DataFrame(
+                    columns=["X", "Y", "priority_rank"]
+                ),
+                "show_priority_shortlist_table": bool(show_priority_shortlist_table),
+                "show_priority_shortlist_plot": bool(show_priority_shortlist_plot),
+                "shortlist_top_n": int(shortlist_top_n),
+                "include_ci_only_shortlist": bool(include_ci_only_shortlist),
                 "full_diag_table": pd.DataFrame(
                     columns=[
                         "row_key",
@@ -1739,6 +1934,8 @@ def main() -> None:
                         "is_outlier_residual",
                         "is_influential",
                         "is_outlier_candidate",
+                        "is_priority_shortlist",
+                        "priority_rank",
                         "outlier_class",
                         "action",
                         "outside_95_ci",
@@ -1793,10 +1990,11 @@ def main() -> None:
     st.subheader("Multipanel Regression Figure")
     st.pyplot(fig, use_container_width=True)
 
-    st.subheader("Outlier Diagnostics (Table/Text only)")
+    st.subheader("Outlier Diagnostics")
     st.caption(
         "Residual outlier and influential flags are separated. "
-        "Only residual outliers are used for optional removal."
+        "Only residual outliers are used for optional removal. "
+        "Top-N shortlist can be optionally overlaid on plots."
     )
 
     for idx, result in enumerate(panel_results):
@@ -1872,6 +2070,17 @@ def main() -> None:
             else:
                 st.dataframe(outlier_table, use_container_width=True)
 
+            if result.get("show_priority_shortlist_table", False):
+                shortlist_n = int(result.get("shortlist_top_n", 5))
+                include_ci_only = bool(result.get("include_ci_only_shortlist", True))
+                shortlist_note = "residual outlier + CI-only" if include_ci_only else "residual outlier only"
+                st.write(f"Priority shortlist (Top {shortlist_n}, rule: {shortlist_note})")
+                shortlist_table = result.get("priority_shortlist_table", pd.DataFrame()).copy()
+                if shortlist_table.empty:
+                    st.info("No priority shortlist rows available with current criteria.")
+                else:
+                    st.dataframe(shortlist_table, use_container_width=True, hide_index=True)
+
             st.write("Full diagnostics table (all rows)")
             full_diag_table = result["full_diag_table"].copy()
             if full_diag_table.empty:
@@ -1924,6 +2133,15 @@ def main() -> None:
                         "is_influential": st.column_config.CheckboxColumn(
                             "is_influential",
                             help="Influential point by Cook's D or leverage threshold.",
+                        ),
+                        "is_priority_shortlist": st.column_config.CheckboxColumn(
+                            "is_priority_shortlist",
+                            help="Included in Top-N priority shortlist.",
+                        ),
+                        "priority_rank": st.column_config.NumberColumn(
+                            "priority_rank",
+                            help="Priority order within shortlist (1 is highest).",
+                            format="%d",
                         ),
                         "outlier_class": st.column_config.TextColumn(
                             "outlier_class",
